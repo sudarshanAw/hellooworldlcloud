@@ -1,2 +1,6 @@
 flask
 gunicorn
+sentence-transformers
+scikit-learn
+numpy
+pdfminer.six
