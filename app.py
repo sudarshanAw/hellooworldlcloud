@@ -1,34 +1,38 @@
-from flask import Flask, request, jsonify
-from pdfminer.high_level import extract_text
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
 import os
+from flask import Flask, request, jsonify
+from PyPDF2 import PdfReader
+from sentence_transformers import SentenceTransformer, util
 
 app = Flask(__name__)
+model = SentenceTransformer("all-MiniLM-L6-v2")  # Lightweight and memory-efficient
 
-# Load embedding model once at startup
-model = SentenceTransformer('all-MiniLM-L6-v2')
+def extract_text_from_pdf(file_path):
+    text = ""
+    with open(file_path, "rb") as f:
+        reader = PdfReader(f)
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+    return text
 
-@app.route("/")
-def home():
-    return "Hello from Flask on Render!"
+def get_reduced_context(question, folder_path, max_sentences=5):
+    question_embedding = model.encode(question, convert_to_tensor=True)
+    best_matches = []
 
-@app.route("/embed", methods=["POST"])
-def embed():
-    data = request.json['text']
-    # Sample test embedding output
-    return jsonify({"embedding": [0.1, 0.2, 0.3]})
-
-# Function to load and combine all PDF text
-def extract_text_from_all_pdfs(folder="data"):
-    combined_text = ""
-    for filename in os.listdir(folder):
+    for filename in os.listdir(folder_path):
         if filename.endswith(".pdf"):
-            path = os.path.join(folder, filename)
-            text = extract_text(path)
-            combined_text += f"\n\n--- {filename} ---\n{text}"
-    return combined_text
+            file_path = os.path.join(folder_path, filename)
+            text = extract_text_from_pdf(file_path)
+            sentences = text.split(". ")
+            embeddings = model.encode(sentences, convert_to_tensor=True)
+
+            cosine_scores = util.pytorch_cos_sim(question_embedding, embeddings)[0]
+            top_results = cosine_scores.topk(k=min(max_sentences, len(sentences)))
+
+            for score, idx in zip(top_results[0], top_results[1]):
+                best_matches.append((float(score), sentences[int(idx)]))
+
+    best_matches.sort(key=lambda x: x[0], reverse=True)
+    return [s for _, s in best_matches[:max_sentences]]
 
 @app.route("/reduce-from-pdfs", methods=["POST"])
 def reduce_from_pdfs():
@@ -37,23 +41,10 @@ def reduce_from_pdfs():
     if not question:
         return jsonify({"error": "Missing 'question' in request."}), 400
 
-    # Load full text from PDFs
-    full_text = extract_text_from_all_pdfs("data")
-    sentences = full_text.split(". ")
-
-    # Embed question and sentences
-    question_embedding = model.encode([question])
-    sentence_embeddings = model.encode(sentences)
-
-    # Find most similar sentences
-    similarities = cosine_similarity(question_embedding, sentence_embeddings)[0]
-    top_k = np.argsort(similarities)[-5:][::-1]
-
-    # Combine top sentences as reduced context
-    reduced_context = ". ".join([sentences[i] for i in top_k])
+    reduced_context = get_reduced_context(question, folder_path="data")
     return jsonify({
         "question": question,
-        "reduced_context": reduced_context
+        "reduced_context": " ".join(reduced_context)
     })
 
 if __name__ == "__main__":
